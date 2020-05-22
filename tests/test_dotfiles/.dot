@@ -1,0 +1,19 @@
+# Example .dot file
+
+[home]
+standard
+special = "different.format.special"
+another
+
+[config]
+in_config
+as_such = "as_such" # no prefixing
+
+[ignore]
+dont_traverse_me
+
+# here are more just in case
+_bad_dir
+.weirdo
+
+# That's it!

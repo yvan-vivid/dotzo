@@ -1,0 +1,13 @@
+session_name: Dotr
+start_directory: './'
+shell_command_before:
+  - 'export DOTZO_PROJECT_DIR=$(pwd)'
+  - 'export SSH_AUTH_SOCK=~/.ssh/auth_sock'
+  - 'clear'
+windows:
+  - window_name: Interaction
+  - window_name: Dev
+    layout: even-horizontal
+    panes:
+      - null
+      - focus: true

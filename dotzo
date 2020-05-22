@@ -1,0 +1,675 @@
+#!/usr/bin/env bash
+################################################################################
+# Yvan Vivid -- Dotfiles management
+################################################################################
+read -r -d '' dotzo__doc << EOF
+  These are dotzo's docs!!
+EOF
+
+show_help() {
+  help_cli
+}
+
+################################################################################
+# Constants
+################################################################################
+
+declare -ga default_dotrc_locations
+default_dotrc_locations=(
+  "$HOME/.config/dotrc"
+  "$HOME/.dotrc"
+  "$HOME/dotrc"
+  "$HOME/_/dotrc"
+)
+
+################################################################################
+# Registers
+################################################################################
+
+declare -g root home
+
+################################################################################
+# Options
+################################################################################
+
+declare -g \
+  opt__home__root \
+  opt__home__config \
+  opt__home__clobber \
+  opt__home__dot_root
+
+declare -ga opt__home
+opt__home=(root config clobber dot_root)
+
+load__opt__home() {
+  : "${opt__home__root:="$HOME"}"
+  : "${opt__home__config:="$opt__home__root/.config"}"
+  : "${opt__home__clobber:="$opt__home__root/.clobber"}"
+  : "${opt__home__dot_root:="$opt__home__root/._"}"
+  home="$opt__home__root"
+}
+
+show__opt_home() {
+  local w
+  echo "Home:"
+  for n in "${opt__home[@]}"; do
+    w="opt__home__${n}"
+    echo "    $n = ${!w}"
+  done
+}
+
+################################################################################
+
+declare -g \
+  opt__dotfiles__root \
+  opt__dotfiles__repo
+
+declare -ga opt__dotfiles
+opt__dotfiles=(root repo)
+
+load__opt__dotfiles() {
+  : "${opt__dotfiles__root:="$HOME/_"}"
+  : "${opt__dotfiles__repo:="$__dotfiles_repo"}"
+  root="$opt__dotfiles__root"
+}
+
+show__opt_dotfiles() {
+  local w
+  echo "Dotfiles:"
+  for n in "${opt__dotfiles[@]}"; do
+    w="opt__dotfiles__${n}"
+    echo "    $n = ${!w}"
+  done
+}
+
+################################################################################
+
+declare -g \
+  opt__secure__root \
+  opt__secure__ssh \
+  opt__secure__ssh_link
+
+declare -ga opt__secure
+opt__secure=(root ssh ssh_link)
+
+load__opt__secure() {
+  : "${opt__secure__root:="var/secure"}"
+  : "${opt__secure__ssh:="ssh"}"
+  : "${opt__secure__ssh_link:="$HOME/.ssh"}"
+}
+
+show__opt_secure() {
+  local w
+  echo "Secure:"
+  for n in "${opt__secure[@]}"; do
+    w="opt__secure__${n}"
+    echo "    $n = ${!w}"
+  done
+}
+
+################################################################################
+
+load_options() {
+  load__opt__dotfiles
+  load__opt__home
+  load__opt__secure
+}
+
+show_options() {
+  echo "-------------- Options -----------------"
+  echo 
+  show__opt_dotfiles
+  echo
+  show__opt_home
+  echo
+  show__opt_secure
+  echo
+  echo "----------------------------------------"
+}
+
+################################################################################
+# Define CLI
+################################################################################
+
+# shellcheck disable=2034
+define_cli_params() {
+  typeset -gr ___cli__help_title='dotzo documentation'
+  typeset -gr ___cli__command_name='dotzo'
+  typeset -gr ___cli__help_message="$dotzo__doc"
+
+  # arguments
+  typeset -gr \
+    __help__n=0 \
+    __dry_run__n=0 \
+    __dotrc__n=0 \
+    __verbose__n=0 \
+    __very_verbose__n=0 \
+    __secure__n=1 \
+    __dotfiles_repo__n=1
+
+  # short forms
+  typeset -gr \
+    __help__short="h" \
+    __verbose__short="v" \
+    __dry_run__short="n"
+  
+  # defaults
+  typeset -g \
+    __dry_run='' __dotrc='' __verbose='' __very_verbose='' __secure='' \
+    __dotfiles_repo=''
+  
+  # docs
+  typeset -gr \
+    __dry_run__doc='do a dry-run of the operation' \
+    __help__doc="show help documentation" \
+    __dotrc__doc="specify dotrc file" \
+    __verbose__doc="show verbose messaging" \
+    __very_verbose__doc="show debugging level messaging" \
+    __secure__doc="secure source for sync" \
+    __dotfiles_repo__doc="local dotfiles repository"
+  
+  # parameters declaration
+  typeset -gar ___cli__params=( \
+    __dotrc __help __dry_run __verbose __very_verbose __secure __dotfiles_repo \
+  )
+}
+define_cli_params
+
+################################################################################
+# Including library
+################################################################################
+
+#% ignore {
+typeset -gr ___libzo=$(cd "$(dirname "$0")/lib" || exit 1; pwd -L)
+#% }
+
+#% include "./lib/lib.bash" {
+# shellcheck source=./lib/lib.bash
+source "${___libzo}/lib.bash"
+#% }
+
+################################################################################
+# RC Writing
+################################################################################
+
+write_rc() {
+  echo "# Config file for dotzo"
+  echo
+  echo "[dot] # primary variables"
+  echo "root=$root"
+  echo "repo=$opt__dotfiles__repo"
+}
+
+################################################################################
+# Utility Functions
+################################################################################
+
+est_dir() {
+  local base context
+  base="$(basename "$1")"
+  context="$(dirname "$1")"
+  if [[ ! -d "$1" ]]; then
+    log_info "$base not found in $context."
+    if prompt_confirm "Create $base in $context?"; then
+      mkdir "$1"
+      message_checked "Created $base in $context"
+      return 0
+    fi
+    return 1
+  fi
+  log_info "Found $base in $context"
+  return 0
+}
+
+# Get the current git remote origin
+# if no origin exists just echo empty and return 0
+# if not a git repo return 1
+get_git_origin() {
+  local -r path="${1:-.}"
+  if git -C "$path" rev-parse >/dev/null 2>&1
+  then git -C "$path" config --get remote.origin.url; return 0
+  else return 1
+  fi
+}
+
+# Clone repo with git using dz mode and select flags
+clone_repo() {
+  local -r mode="$1"; shift
+  dz_git "$mode" clone --recursive --shallow-submodules "$@"
+}
+
+dotzo_info() {
+  dotzo_init strict
+  show_options
+}
+
+################################################################################
+# Init
+################################################################################
+
+find_dotrc() {
+  local dotrc rc; dotrc=""
+  for rc in "$__dotrc" "${default_dotrc_locations[@]}"; do
+    if [[ -f "$rc" ]]; then
+      dotrc="$rc"
+      break
+    fi
+  done
+
+  if [[ -z $dotrc ]]
+  then log_info "Did not find dotrc."
+  else log_info "Will read dotrc from [$dotrc]."
+  fi
+
+  echo "$dotrc"
+}
+
+dotzo_init() {
+  local mode dotrc
+  mode=${1:-strict}
+  dotrc=$(find_dotrc)
+  if [[ -z "$dotrc" ]]; then
+    if [[ "$mode" == "ask" ]] \
+      && prompt_confirm "No dotrc file found. Use defaults?"
+    then message_checked "Using defaults."
+    else
+      message_exed "Need a 'dotrc' file."
+      fail_with "Conditions unsatisfied."
+    fi
+  else
+    log_info "Parsing dotrc"
+    config_parser "opt" < "$dotrc"
+  fi
+
+  log_info "Initializing options"
+  load_options
+
+  log_info "Dotzo initialized."
+}
+
+################################################################################
+# Setup
+################################################################################
+
+check_root_repo() {
+  local origin root remote
+  root="$1"; shift
+  remote="$opt__dotfiles__repo"
+
+  log_info "Checking [$root]."
+  if [[ ! -d "$root" ]]; then
+    message_exed "Root does not exist."
+    return 1
+  fi
+
+  if ! origin=$(get_git_origin "$root"); then
+    if prompt_confirm "Root is not a git repo. Is this okay?"; then
+      message_checked "Using non-repo root."
+      return 0
+    fi
+    message_exed "Non-repo root rejected."
+    return 1
+  fi
+
+  log_info "Checking origin [$origin]."
+  if [[ -z "$origin" ]]; then
+    if prompt_confirm "Root is not linked to an origin. Is this okay?"; then
+      message_checked "Using local-only root."
+      return 0
+    fi
+    message_exed "Local-only root rejected."
+    return 1
+  fi
+
+  if ! [[ ("$remote" =~ ^https) || ("$remote" =~ ^git@) ]]; then
+    remote="$(normalize "$remote")"
+    origin="$(normalize "$origin")"
+  fi
+
+  if [[ "$origin" == "$remote" ]]; then
+    message_checked "Using root linked given origin."
+    return 0
+  fi
+
+  if prompt_confirm "Root has origin = [$origin]. Is this okay?"; then
+    message_checked "Using root with this origin. (Consider changing in dotrc)"
+    return 0
+  fi
+
+  message_exed "Nonstandard origin rejected. Consider changing in dotrc."
+  return 1
+}
+
+est_dot_root() {
+  if [[ ! -d "$root" ]]; then
+    if prompt_confirm "Root at [$root] does not exist. Clone root there?"; then
+      if [[ -z "$opt__dotfiles__repo" ]]; then
+        message_exed "No repo location given."
+        fail_with "Use '--dotfiles-repo' or create dotrc file."
+      fi
+      clone_repo auto "$opt__dotfiles__repo" "$root"
+      if ! is_dry; then
+        log_info "Checking new root."
+        check_root_repo "$root" || fail_with "Found issues with root."
+        log_info "Re-initializing newly create root."
+        dotzo_init strict
+      fi
+      message_checked "Root created at [$root]."
+    else
+      message_exed "Root must be created at [$root]."
+      fail_with "No root."
+    fi
+  else
+    message_checked "Using root at [$root]"
+    check_root_repo "$root" || fail_with "Found issues with root."
+    message_checked "Root checked."
+  fi
+}
+
+dotzo_check_repo() {
+  log_info "Initializing dotzo."
+  dotzo_init strict
+
+  log_info "Checking root."
+  check_root_repo "$root"
+}
+
+dotzo_setup() {
+  log_info "Initializing dotzo."
+  dotzo_init ask
+
+  log_info "Establishing root."
+  est_dot_root
+ 
+  prompt_confirm "Continue to run sync-secure?" && dotzo_sync_secure
+  prompt_confirm "Continue to run sync?" && dotzo_sync
+}
+
+################################################################################
+# Sync
+################################################################################
+
+init_home() {
+  dz_pushd auto "$home"
+  dz_mkdir auto -p "$opt__home__config" "$opt__home__clobber"
+  make_link rel "$opt__home__dot_root" "$root"
+  dz_popd auto
+  message_checked "All home structure set up."
+
+  echo "export DOT_ROOT=$root" > "$home/.dot_env"
+  message_checked "Synced envar bootstrap."
+}
+
+link_secure() {
+  local ssh_target ssh_link
+  ssh_target="$root/$opt__secure__root/$opt__secure__ssh"
+  ssh_link="$opt__secure__ssh_link"
+
+  if [[ ! -d "$ssh_target" ]]; then
+    log_info "No ssh found in secure-root. Skipping."
+    return 0
+  fi
+
+  log_info "Will create link [$ssh_link] => [$ssh_target]"
+  local -i check_link_rc
+  check_link rel "$ssh_link" "$ssh_target"
+  check_link_rc=$?
+
+  # shellcheck disable=SC2154
+  if (( check_link_rc == check_link__link_clob )); then
+    if prompt_confirm "Move existing at [$ssh_link] to clobber"; then
+      dz_clobber auto "$opt__home__clobber" "$ssh_link"
+    fi
+  fi
+
+  # shellcheck disable=SC2154
+  if (( check_link_rc == check_link__src_diff )); then
+    prompt_confirm "Overwrite existing link [$ssh_link]" || return 0
+  fi
+
+  if (( check_link_rc != 0 )); then
+    make_link rel "$ssh_link" "$ssh_target"
+    message_checked "Made ssh link [$ssh_link] => [$ssh_target]"
+  else
+    log_info "Correct ssh link already exist"
+  fi
+}
+
+# Sync action formats
+#   action = src:link:src_from_link
+#   where link is absolute and src is from root
+declare -ga \
+  sync__none \
+  sync__create \
+  sync__update \
+  sync__fix
+
+clear_link_actions() {
+  sync__create=()
+  sync__fix=()
+  sync__none=()
+  sync__update=()
+}
+
+make_link_action() {
+  local src link
+  src="$1"; shift; link="$1"; shift
+
+  if [[ ! -e "$src" ]]; then
+    log_warn "[$src] does not exist."
+    return 1
+  fi
+
+  if [[ ! -L "$link" ]]; then
+    if [[ ! -e "$link" ]]
+    then sync__create+=("$src:$dest::")
+    else sync__fix+=("$src:$dest::")
+    fi
+    return 0
+  fi
+
+  # assert => $link is a symlink to some location that may exist
+  local link_dir src_from_link src_should_be action
+  src_from_link="$(readlink "$link")"
+  link_dir="$(dirname "$link")"
+  src_should_be="$(relativize "$src" "$link_dir")"
+  action="$src:$dest:$src_should_be:$src_from_link"
+  
+  if [[ "$src_from_link" == "$src_should_be" ]];
+  then sync__none+=("$action")
+  else sync__update+=("$action")
+  fi
+}
+
+traverse_kernel() {
+  local path dottr
+  path="$1"; shift
+  dottr="$path/.dot"
+
+  local -a mapping
+  local visited mapping_str item item_find src dest
+  visited=":"
+
+  # look for a .dot file
+  if [[ -f "$dottr" ]]; then
+    dot_parser "$dottr"
+
+    # shellcheck disable=2154
+    for mapping_str in "${dot_parser__mapping[@]}"; do
+      IFS=":"  read -ra mapping <<< "$mapping_str:"
+      src="${mapping[1]}"
+      dest="${mapping[2]}"
+      case "${mapping[0]}" in
+        (home)   dest="$opt__home__root/${dest:-".$src"}";;
+        (config) dest="$opt__home__config/${dest:-"$src"}";;
+        (ignore) visited+="$src:"; continue;;
+        (*) continue;;
+      esac
+      make_link_action "$path/$src" "$dest"
+    done
+  fi
+
+  for item in "$path"/*; do [[ -d "$item" ]] || continue
+    item_find=":$(basename "$item"):"
+    [[ "$visited" =~ $item_find ]] && continue
+    traverse_kernel "$item"
+  done
+}
+
+traverse() {
+  clear_link_actions
+  dz_pushd wet "$root"
+
+  log_info "Traversing etc directories and determinings sync actions."
+  traverse_kernel "etc"
+  message_checked "Scanned for sync actions."
+
+  local action
+  local -a params
+  local -i count_none count_fix count_update count_create total
+  count_none=${#sync__none[@]}
+  count_fix=${#sync__fix[@]}
+  count_update=${#sync__update[@]}
+  count_create=${#sync__create[@]}
+  total=$(( count_none + count_create + count_update + count_fix ))
+
+  if (( count_none == total )); then
+    message_checked "All links in sync."
+    dz_popd wet
+    return 0
+  fi
+
+  # No action
+  if (( count_none > 0 )); then
+    message_checked "$count_none of $total correct links already found"
+  fi
+
+  # Fix links to things that would get clobbered
+  if (( count_fix > 0 )); then
+    message_notify "$count_fix of $total links would clobber existing files"
+    for action in "${sync__fix[@]}"; do
+      IFS=":" read -ra params <<< "$action:"
+      log_info " -- Will fix: ${params[1]} <= ${params[0]}"
+    done
+    if prompt_confirm "Fix these? Will move existing to [$opt__home__clobber]."; then
+      for action in "${sync__fix[@]}"; do
+        IFS=":" read -ra params <<< "$action:"
+        dz_clobber auto "$opt__home__clobber" "${params[1]}" \
+          && make_link rel "${params[1]}" "${params[0]}"
+      done
+      message_checked "Links created and collisions moved"
+    fi
+  fi
+  
+  # Repair links to wrong source
+  if (( count_update > 0 )); then
+    message_notify "$count_update of $total links need to be corrected"
+    for action in "${sync__update[@]}"; do
+      IFS=":" read -ra params <<< "$action:"
+      log_info " -- Will update: ${params[1]} <= ${params[0]}, from ${params[3]}"
+    done
+    if prompt_confirm "Update these?"; then
+      for action in "${sync__update[@]}"; do
+        IFS=":" read -ra params <<< "$action:"
+        make_link rel "${params[1]}" "${params[0]}"
+      done
+      message_checked "Links updated"
+    fi
+  fi
+  
+  # Repair links to wrong source
+  if (( count_create > 0 )); then
+    message_notify "$count_create of $total links need to be created"
+    for action in "${sync__create[@]}"; do
+      IFS=":" read -ra params <<< "$action:"
+      log_info " -- Will create: ${params[1]} <= ${params[0]}"
+    done
+    if prompt_confirm "Create these?"; then
+      for action in "${sync__create[@]}"; do
+        IFS=":" read -ra params <<< "$action:"
+        make_link rel "${params[1]}" "${params[0]}"
+      done
+      message_checked "Links created"
+    fi
+  fi
+  
+  dz_popd wet
+  message_checked "Completed work on links"
+}
+
+dotzo_sync() {
+  log_info "Initializing dotzo."
+  dotzo_init strict
+  
+  log_info "Setting up home environment."
+  init_home
+  
+  log_info "Constructing links."
+  traverse
+
+  log_info "Secure links."
+  link_secure
+}
+
+################################################################################
+# Sync Secure
+################################################################################
+
+sync_secure() {
+  local secure_root secure_source
+  secure_root="$root/$opt__secure__root"
+  secure_source="$__secure"
+
+  if [[ -z "$secure_source" ]]; then
+    fail_with "Must provide '--secure' source directory."
+  elif [[ ! -d "$secure_source" ]]; then
+    fail_with "[$secure_source] is not a valid directory."
+  fi
+
+  if prompt_confirm "Will sync secure data from [$secure_source]"; then
+    dz_mkdir auto -p "$secure_root"
+    dz_rsync auto "$secure_source/" "$secure_root/"
+  fi
+}
+
+dotzo_sync_secure() {
+  log_info "Initializing dotzo."
+  dotzo_init strict
+  
+  log_info "Syncing secure data."
+  sync_secure
+}
+
+################################################################################
+# Main driver
+################################################################################
+
+# Get the subcommand and parse the rest
+subcmd="$1"; shift
+parse_cli "$@"
+
+if [[ -n "$__verbose" ]]
+then set_log_level 3
+else set_log_level 2
+fi
+set_dry "$__dry_run"
+
+log_info "Running '$subcmd'."
+case "$subcmd" in
+  # Utilities
+  (help|-h|--help) show_help;;
+  
+  # Primary commands
+  (init)        dotzo_init strict;;
+  (setup)       dotzo_setup;;
+  (check-repo)  dotzo_check_repo;;
+  (sync)        dotzo_sync;;
+  (sync-secure) dotzo_sync_secure;;
+  (info)        dotzo_info;;
+  
+  # Testing
+  (other) ;;
+esac
+
+################################################################################
+################################################################################

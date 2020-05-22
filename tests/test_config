@@ -1,0 +1,29 @@
+# vim: ft=toml
+
+[first_section]
+# This is the first section
+
+key_one = value
+key_two = "quoted value"
+key_three = 'single quoted value'
+
+[first_section.specifics]
+another_key = "another quoted value"
+
+[second_section]
+different_key = 5 # is the number
+
+[second_section.items::]
+first
+
+# more
+second
+third/is/a/path.to.file
+"fourth quoted"
+
+'fifth single quoted'
+
+[another_list::]
+1
+2
+3
